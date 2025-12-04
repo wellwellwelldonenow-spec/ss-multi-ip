@@ -1,10 +1,10 @@
-#!/usr/bin/env bash
+#!/bin/bash
 
 # 多 IP 服务器一键生成 Shadowsocks 节点，不同 IP 落地
-# 参考：xrayL.sh 思路，每个 IP 对应一个入站 + 出站 + 路由规则
+# 思路：每个 IP 对应一个入站 + 出站 + 路由规则，sendThrough 绑定出口 IP
 
 DEFAULT_START_PORT=20000           # 默认起始端口
-DEFAULT_SS_METHOD="aes-256-gcm"   # 默认加密方式（可改成 2022-blake3-* 等）
+DEFAULT_SS_METHOD="aes-256-gcm"   # 默认加密方式
 DEFAULT_SS_PASSWORD="password123" # 默认密码，建议安装后自己改
 
 # 获取本机所有 IP 地址（IPv4/IPv6）
@@ -163,7 +163,15 @@ config_ss_multi_ip() {
     for ((i = 0; i < ${#SELECTED_IPS[@]}; i++)); do
         port=$((START_PORT + i))
         ip="${SELECTED_IPS[i]}"
-        echo "  第$((i + 1))个：IP=${ip}  端口=${port}  method=${SS_METHOD}  password=${SS_PASSWORD}"
+        echo "  第$((i + 1))个：IP=${ip}  端口=${port}  IP:Port=${ip}:${port}  method=${SS_METHOD}  password=${SS_PASSWORD}"
+    done
+
+    echo
+    echo "IP:Port 列表（可直接粘到 gost 批量配置里）："
+    for ((i = 0; i < ${#SELECTED_IPS[@]}; i++)); do
+        port=$((START_PORT + i))
+        ip="${SELECTED_IPS[i]}"
+        echo "${ip}:${port}"
     done
 }
 
