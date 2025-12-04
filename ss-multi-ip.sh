@@ -37,7 +37,7 @@ install_xray() {
 
     mkdir -p /etc/xrayL
 
-    cat >/etc/systemd/system/xrayL.service <<SERVICEEOF
+    cat >/etc/systemd/system/xrayL.service <<'SERVICEEOF'
 [Unit]
 Description=XrayL Service
 After=network.target
