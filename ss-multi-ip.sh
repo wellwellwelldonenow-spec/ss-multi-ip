@@ -2,12 +2,19 @@
 
 # 多 IP 服务器一键生成 Shadowsocks 节点，不同 IP 落地
 # 思路：每个 IP 对应一个入站 + 出站 + 路由规则，sendThrough 绑定出口 IP
+# 用法：
+#   bash ss-multi-ip.sh          # 安装/修复 XrayL + 生成多 IP SS 配置
+#   bash ss-multi-ip.sh clear    # 备份并清空 /etc/xrayL/config.toml，只保留空日志配置
 
 set -e
 
 DEFAULT_START_PORT=20000           # 默认起始端口
 DEFAULT_SS_METHOD="aes-256-gcm"    # 默认加密方式
 DEFAULT_SS_PASSWORD="password123"  # 默认密码，建议安装后自己改
+
+CONFIG_DIR="/etc/xrayL"
+CONFIG_FILE="${CONFIG_DIR}/config.toml"
+SERVICE_FILE="/etc/systemd/system/xrayL.service"
 
 # 获取本机所有 IP 地址（IPv4/IPv6）
 IP_ADDRESSES=($(hostname -I))
@@ -39,10 +46,10 @@ install_or_fix_xray() {
         echo "已检测到 xrayL：$(command -v xrayL)"
     fi
 
-    mkdir -p /etc/xrayL
+    mkdir -p "${CONFIG_DIR}"
 
     # 无论之前怎样，每次都重写 service，保证干净
-    cat >/etc/systemd/system/xrayL.service <<'SERVICEEOF'
+    cat > "${SERVICE_FILE}" <<'SERVICEEOF'
 [Unit]
 Description=XrayL Service
 After=network.target
@@ -50,8 +57,8 @@ After=network.target
 [Service]
 ExecStart=/usr/local/bin/xrayL -c /etc/xrayL/config.toml
 Restart=on-failure
-User=nobody
 RestartSec=3
+User=nobody
 LimitNOFILE=1048576
 
 [Install]
@@ -62,7 +69,7 @@ SERVICEEOF
     systemctl enable xrayL.service >/dev/null 2>&1 || true
     systemctl restart xrayL.service || true
 
-    echo "xrayL.service 已写入 /etc/systemd/system/xrayL.service 并尝试启动。"
+    echo "xrayL.service 已写入 ${SERVICE_FILE} 并尝试启动。"
 }
 
 config_ss_multi_ip() {
@@ -150,12 +157,13 @@ config_ss_multi_ip() {
         config_content+="outboundTag = \"${tag}\"\n\n\n"
     done
 
-    echo -e "${config_content}" > /etc/xrayL/config.toml
+    echo -e "${config_content}" > "${CONFIG_FILE}"
+    sed -i 's/\r$//' "${CONFIG_FILE}"
 
-    echo "已写入 /etc/xrayL/config.toml，测试配置..."
+    echo "已写入 ${CONFIG_FILE}，测试配置..."
 
     # 用 Xray 自带的 -test 检查配置是否合法
-    if /usr/local/bin/xrayL run -test -c /etc/xrayL/config.toml >/tmp/xrayL_test.log 2>&1; then
+    if /usr/local/bin/xrayL run -test -c "${CONFIG_FILE}" >/tmp/xrayL_test.log 2>&1; then
         echo "配置测试通过。"
     else
         echo "配置测试失败，错误信息："
@@ -192,9 +200,49 @@ config_ss_multi_ip() {
     done
 }
 
+clear_ss_config() {
+    echo "===== 清空 XrayL 多 IP Shadowsocks 配置 ====="
+    if [ ! -f "${CONFIG_FILE}" ]; then
+        echo "未找到 ${CONFIG_FILE}，无需清空。"
+        return 0
+    fi
+
+    local backup="${CONFIG_FILE}.$(date +%Y%m%d%H%M%S).bak"
+    echo "将备份当前配置到：${backup}"
+    cp "${CONFIG_FILE}" "${backup}"
+
+    echo
+    read -r -p "确认清空 /etc/xrayL/config.toml 并停止所有 SS 监听端口？(y/N): " c
+    case "${c}" in
+        y|Y)
+            # 写入一个最小的仅日志配置，不开启任何入站
+            cat > "${CONFIG_FILE}" <<'EOF'
+[log]
+loglevel = "warning"
+EOF
+            sed -i 's/\r$//' "${CONFIG_FILE}"
+
+            systemctl restart xrayL.service 2>/dev/null || true
+
+            echo "已清空 SS 多 IP 配置（保留最小日志配置）。"
+            echo "原配置已备份为：${backup}"
+            ;;
+        *)
+            echo "已取消清空。"
+            ;;
+    esac
+}
+
 main() {
-    install_or_fix_xray
-    config_ss_multi_ip
+    case "$1" in
+        clear|--clear)
+            clear_ss_config
+            ;;
+        *)
+            install_or_fix_xray
+            config_ss_multi_ip
+            ;;
+    esac
 }
 
 main "$@"
