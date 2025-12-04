@@ -3,40 +3,45 @@
 # 多 IP 服务器一键生成 Shadowsocks 节点，不同 IP 落地
 # 思路：每个 IP 对应一个入站 + 出站 + 路由规则，sendThrough 绑定出口 IP
 
+set -e
+
 DEFAULT_START_PORT=20000           # 默认起始端口
-DEFAULT_SS_METHOD="aes-256-gcm"   # 默认加密方式
-DEFAULT_SS_PASSWORD="password123" # 默认密码，建议安装后自己改
+DEFAULT_SS_METHOD="aes-256-gcm"    # 默认加密方式
+DEFAULT_SS_PASSWORD="password123"  # 默认密码，建议安装后自己改
 
 # 获取本机所有 IP 地址（IPv4/IPv6）
 IP_ADDRESSES=($(hostname -I))
 
-install_xray() {
-    echo "安装 Xray..."
+install_or_fix_xray() {
+    echo "安装 / 修复 Xray..."
 
-    if command -v xrayL >/dev/null 2>&1; then
-        echo "已检测到 xrayL，跳过安装"
-        return
-    fi
+    # 安装二进制
+    if ! command -v xrayL >/dev/null 2>&1; then
+        echo "未检测到 xrayL，开始安装..."
 
-    if command -v apt-get >/dev/null 2>&1; then
-        apt-get update -y
-        apt-get install -y wget unzip
-    elif command -v yum >/dev/null 2>&1; then
-        yum install -y wget unzip
+        if command -v apt-get >/dev/null 2>&1; then
+            apt-get update -y
+            apt-get install -y wget unzip
+        elif command -v yum >/dev/null 2>&1; then
+            yum install -y wget unzip
+        else
+            echo "未找到 apt-get 或 yum，请手动安装 wget unzip 后重试"
+            exit 1
+        fi
+
+        cd /tmp || exit 1
+        wget -O Xray-linux-64.zip "https://github.com/XTLS/Xray-core/releases/download/v1.8.3/Xray-linux-64.zip"
+        unzip -o Xray-linux-64.zip
+        mv xray /usr/local/bin/xrayL
+        chmod +x /usr/local/bin/xrayL
+        echo "xrayL 安装完成：/usr/local/bin/xrayL"
     else
-        echo "未找到 apt-get 或 yum，请手动安装 wget unzip 后重试"
-        exit 1
+        echo "已检测到 xrayL：$(command -v xrayL)"
     fi
-
-    cd /tmp || exit 1
-
-    wget -O Xray-linux-64.zip "https://github.com/XTLS/Xray-core/releases/download/v1.8.3/Xray-linux-64.zip"
-    unzip -o Xray-linux-64.zip
-    mv xray /usr/local/bin/xrayL
-    chmod +x /usr/local/bin/xrayL
 
     mkdir -p /etc/xrayL
 
+    # 无论之前怎样，每次都重写 service，保证干净
     cat >/etc/systemd/system/xrayL.service <<'SERVICEEOF'
 [Unit]
 Description=XrayL Service
@@ -54,10 +59,10 @@ WantedBy=multi-user.target
 SERVICEEOF
 
     systemctl daemon-reload
-    systemctl enable xrayL.service
-    systemctl restart xrayL.service
+    systemctl enable xrayL.service >/dev/null 2>&1 || true
+    systemctl restart xrayL.service || true
 
-    echo "Xray 安装完成."
+    echo "xrayL.service 已写入 /etc/systemd/system/xrayL.service 并尝试启动。"
 }
 
 config_ss_multi_ip() {
@@ -147,6 +152,18 @@ config_ss_multi_ip() {
 
     echo -e "${config_content}" > /etc/xrayL/config.toml
 
+    echo "已写入 /etc/xrayL/config.toml，测试配置..."
+
+    # 用 Xray 自带的 -test 检查配置是否合法
+    if /usr/local/bin/xrayL run -test -c /etc/xrayL/config.toml >/tmp/xrayL_test.log 2>&1; then
+        echo "配置测试通过。"
+    else
+        echo "配置测试失败，错误信息："
+        cat /tmp/xrayL_test.log
+        echo "请根据错误信息检查 config.toml。"
+        return 1
+    fi
+
     systemctl restart xrayL.service
     systemctl --no-pager status xrayL.service || true
 
@@ -176,7 +193,7 @@ config_ss_multi_ip() {
 }
 
 main() {
-    [ -x "$(command -v xrayL)" ] || install_xray
+    install_or_fix_xray
     config_ss_multi_ip
 }
 
