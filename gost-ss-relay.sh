@@ -15,6 +15,7 @@
 # 11. 配置自定义 TLS 证书
 # 12. 批量新增 gost 转发（起始端口 + ip:port 列表）
 # 13. 清空所有 gost 转发配置（危险操作，会停止中转服务）
+# 14. 生成 Shadowsocks 链接和二维码（基于当前转发配置）
 
 set -e
 
@@ -245,7 +246,7 @@ start_gost_service() {
 
 stop_gost_service() {
     systemctl stop "${SERVICE_NAME}" 2>/dev/null || true
-    systemctl --no-pager status "${SERVICE_NAME}" || true
+    systemctl --no-pager status "${SERVICE_NAME}" 2>/dev/null || true
 }
 
 restart_gost_service() {
@@ -630,6 +631,130 @@ configure_tls_cert() {
     esac
 }
 
+install_qrencode_if_needed() {
+    if command -v qrencode >/dev/null 2>&1; then
+        return
+    fi
+
+    echo "未检测到 qrencode，开始安装..."
+
+    if command -v apt-get >/dev/null 2>&1; then
+        apt-get update -y
+        apt-get install -y qrencode
+    elif command -v yum >/dev/null 2>&1; then
+        yum install -y qrencode
+    else
+        echo "未找到 apt-get 或 yum，请手动安装 qrencode 后重试。"
+        return 1
+    fi
+
+    if ! command -v qrencode >/dev/null 2>&1; then
+        echo "qrencode 安装失败，请检查。"
+        return 1
+    fi
+
+    echo "qrencode 安装完成。"
+}
+
+url_safe_base64() {
+    # 标准 base64 编码并去掉换行和 '='，生成 SIP002 兼容的编码
+    printf '%s' "$1" | base64 | tr -d '\n='
+}
+
+generate_ss_links_and_qr() {
+    echo
+    echo "===== 根据 GOST 转发配置生成 Shadowsocks 链接 & 二维码 ====="
+
+    if [ ! -f "${RELAY_CONFIG}" ] || ! grep -qE '^[^#[:space:]]' "${RELAY_CONFIG}" 2>/dev/null; then
+        echo "未找到任何转发配置，请先使用菜单 7 或 12 添加转发。"
+        return
+    fi
+
+    install_qrencode_if_needed || return
+
+    local OUTPUT_DIR="${CONFIG_DIR}/ss-shares"
+    mkdir -p "${OUTPUT_DIR}"
+    local LINKS_FILE="${OUTPUT_DIR}/ss_links.txt"
+    : > "${LINKS_FILE}"
+
+    echo
+    read -r -p "中转服务器地址（客户端填的 server，例如中转机 IP 或域名）: " SERVER_HOST
+    if [ -z "${SERVER_HOST}" ]; then
+        echo "服务器地址不能为空。"
+        return
+    fi
+
+    read -r -p "Shadowsocks 加密方式 method（例如 aes-256-gcm）: " SS_METHOD
+    if [ -z "${SS_METHOD}" ]; then
+        echo "加密方式不能为空。"
+        return
+    fi
+
+    read -r -p "Shadowsocks 密码 password: " SS_PASSWORD
+    if [ -z "${SS_PASSWORD}" ]; then
+        echo "密码不能为空。"
+        return
+    fi
+
+    echo
+    echo "将从 ${RELAY_CONFIG} 中读取 tcp 类型的转发规则，并生成对应的 ss:// 链接。"
+    echo "输出文件：${LINKS_FILE}"
+    echo "二维码目录：${OUTPUT_DIR}"
+    echo
+
+    local idx=0
+
+    while read -r TYPE LPORT RHOST RPORT _; do
+        [ -z "${TYPE}" ] && continue
+        case "${TYPE}" in
+            \#*)
+                continue
+                ;;
+        esac
+
+        # 仅针对 tcp 类型生成 SS 链接
+        if [ "${TYPE}" != "tcp" ]; then
+            continue
+        fi
+
+        if [ -z "${LPORT}" ] || [ -z "${RHOST}" ] || [ -z "${RPORT}" ]; then
+            echo "跳过非法行：${TYPE} ${LPORT} ${RHOST} ${RPORT}"
+            continue
+        fi
+
+        idx=$((idx+1))
+
+        # SIP002: ss://BASE64(method:password@host:port)#TAG
+        local BASE="${SS_METHOD}:${SS_PASSWORD}@${SERVER_HOST}:${LPORT}"
+        local BASE64_PART
+        BASE64_PART="$(url_safe_base64 "${BASE}")"
+
+        local SAFE_RHOST
+        SAFE_RHOST="$(printf '%s' "${RHOST}" | tr ':/' '_')"
+        local TAG="relay-${LPORT}-${SAFE_RHOST}"
+        local SS_URI="ss://${BASE64_PART}#${TAG}"
+
+        echo "${SS_URI}" >> "${LINKS_FILE}"
+
+        local PNG_FILE="${OUTPUT_DIR}/ss_${LPORT}.png"
+        qrencode -o "${PNG_FILE}" "${SS_URI}"
+
+        echo "[$idx] 本地端口=${LPORT}  落地=${RHOST}:${RPORT}"
+        echo "     链接: ${SS_URI}"
+        echo "     二维码: ${PNG_FILE}"
+        echo
+    done < "${RELAY_CONFIG}"
+
+    if [ "${idx}" -eq 0 ]; then
+        echo "没有找到任何 tcp 类型的转发规则，未生成链接。"
+        return
+    fi
+
+    echo "共生成 ${idx} 条 Shadowsocks 链接。"
+    echo "全部链接保存在：${LINKS_FILE}"
+    echo "对应二维码 PNG 文件保存在目录：${OUTPUT_DIR}"
+}
+
 show_menu() {
     echo
     echo "========== GOST SS Relay 管理脚本 =========="
@@ -648,6 +773,7 @@ show_menu() {
     echo "11) 配置自定义 TLS 证书"
     echo "12) 批量新增 gost 转发（起始端口 + ip:port 列表）"
     echo "13) 清空所有 gost 转发配置（危险操作）"
+    echo "14) 生成 Shadowsocks 链接和二维码（基于当前转发配置）"
     echo "-------------------------------------------"
     echo " 0) 退出"
     echo "==========================================="
@@ -656,7 +782,7 @@ show_menu() {
 main_loop() {
     while true; do
         show_menu
-        read -r -p "请输入选项 [0-13]: " choice
+        read -r -p "请输入选项 [0-14]: " choice
         case "${choice}" in
             1) install_gost ;;
             2) update_gost ;;
@@ -671,6 +797,7 @@ main_loop() {
             11) configure_tls_cert ;;
             12) batch_add_relay_config ;;
             13) clear_all_relay_config ;;
+            14) generate_ss_links_and_qr ;;
             0)
                 echo "已退出。"
                 exit 0
